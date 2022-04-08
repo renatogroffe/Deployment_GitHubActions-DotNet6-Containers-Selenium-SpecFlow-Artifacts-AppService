@@ -1,0 +1,79 @@
+name: dotnet6-selenium-containers-azureappservice
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  IMAGE_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME }}/siteconversordistancias-dotnet6
+  ASPNETCORE_URLS: 'http://localhost:5000'
+  DIR_WEBAPP: './ConversorDistancias'
+  DIR_TESTS: './ConversorDistancias.Specs'
+  DLL_PROJECT_TESTS: 'ConversorDistancias.Specs.dll'
+  DIR_REPORT_TESTS: './ConversorDistancias.Specs/Releases'
+  WEBAPP_NAME: 'groffedistancias'
+  
+jobs:
+
+  build-tests-push:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3.0.0
+    - name: Build de imagem
+      run: |
+        cd ${{ env.DIR_WEBAPP }}
+        docker build . --file Dockerfile --tag ${{ env.IMAGE_DOCKERHUB }}:latest      
+    - name: Criar container para testes
+      run: |
+        docker run --name sitetests -p 1234:80 -d ${{ env.IMAGE_DOCKERHUB }}:latest
+        docker container ls
+    - name: Testes com Selenium WebDriver + Chrome Driver
+      env:
+        UrlConversaoDistancias: http://localhost:1234
+      run: |
+        cd ${{ env.DIR_TESTS }}
+        dotnet test -c Release -o Releases
+    - name: Instalar o LivingDoc (SpecFlow)
+      if: always()
+      run: dotnet tool install --global SpecFlow.Plus.LivingDoc.CLI
+    - name: Gerar relatório HTML com o resultado dos testes usando o LivingDoc (SpecFlow)
+      if: always()
+      run: |
+        cd ${{ env.DIR_REPORT_TESTS }}
+        livingdoc test-assembly ${{ env.DLL_PROJECT_TESTS }} --project-language pt-BR -t TestExecution.json
+    - name: Upload do Report de Testes como Artifact
+      uses: actions/upload-artifact@v3.0.0
+      if: always()
+      with:
+        name: results-specflow
+        path: ${{ env.DIR_REPORT_TESTS }}/LivingDoc.html
+        retention-days: 30
+    - name: Login no Docker Hub
+      uses: docker/login-action@v1.14.1
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+    - name: Geração de tag com número do Build e Push no Docker Hub
+      run: |
+        docker tag ${{ env.IMAGE_DOCKERHUB }}:latest ${{ env.IMAGE_DOCKERHUB }}:$GITHUB_RUN_NUMBER
+        docker push --all-tags ${{ env.IMAGE_DOCKERHUB }}
+
+  deployment:
+    needs: [build-tests-push]
+    
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Azure Login - Conectando com Credenciais no Azure
+      uses: Azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    - name: Azure WebApp - Deployment da Aplicacao
+      uses: Azure/webapps-deploy@v2
+      with:
+        app-name: ${{ env.WEBAPP_NAME }}
+        images: '${{ env.IMAGE_DOCKERHUB }}:${{ github.run_number }}'
